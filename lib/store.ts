@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { BlobNotFoundError, BlobPreconditionFailedError, get, put } from "@vercel/blob";
 import { isClientRecord, type ClientInput, type ClientRecord } from "./clients";
-import { STORAGE_SETUP_MESSAGE, type StorageMode } from "./messages";
+import { STORAGE_SETUP_MESSAGE, storageModeFromEnv, type StorageMode } from "./messages";
 
 const BLOB_PATH = "portal/clients.json";
 
@@ -16,9 +16,12 @@ export class StorageNotConfiguredError extends Error {
 }
 
 export function getStorageMode(): StorageMode {
-  if (process.env.BLOB_READ_WRITE_TOKEN?.trim()) return "blob";
-  if (process.env.VERCEL) return "unconfigured";
-  return "file";
+  return storageModeFromEnv({
+    BLOB_READ_WRITE_TOKEN: process.env.BLOB_READ_WRITE_TOKEN,
+    BLOB_STORE_ID: process.env.BLOB_STORE_ID,
+    VERCEL: process.env.VERCEL,
+    VERCEL_OIDC_TOKEN: process.env.VERCEL_OIDC_TOKEN,
+  });
 }
 
 const dataDirectory = path.join(process.cwd(), "data");
