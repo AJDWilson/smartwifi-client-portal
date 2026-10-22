@@ -38,12 +38,23 @@ export async function readJson(
   }
 }
 
+function describeServerError(error: unknown, fallback: string): string {
+  if (!(error instanceof Error)) return fallback;
+  const detail = error.message.replace(/^Vercel Blob:\s*/, "").trim();
+  const exposed =
+    error.name.startsWith("Blob") ||
+    error.message.startsWith("Vercel Blob:") ||
+    detail.startsWith("Client database");
+  if (!exposed || !detail || detail === fallback) return fallback;
+  return `${fallback} ${detail}`;
+}
+
 export function serverError(error: unknown, fallback: string) {
   if (error instanceof StorageNotConfiguredError) {
     return json({ error: error.message }, 503);
   }
   console.error(error);
-  return json({ error: fallback }, 500);
+  return json({ error: describeServerError(error, fallback) }, 500);
 }
 
 export function isClientId(id: string): boolean {

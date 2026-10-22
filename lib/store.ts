@@ -2,7 +2,7 @@ import "server-only";
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { BlobNotFoundError, BlobPreconditionFailedError, get, put } from "@vercel/blob";
+import { BlobNotFoundError, get, head, put } from "@vercel/blob";
 import { isClientRecord, type ClientInput, type ClientRecord } from "./clients";
 import { STORAGE_SETUP_MESSAGE, storageModeFromEnv, type StorageMode } from "./messages";
 
@@ -63,14 +63,41 @@ async function writeFileStore(clients: ClientRecord[]): Promise<void> {
   await writeFile(path.join(dataDirectory, clientFileName), `${JSON.stringify({ clients }, null, 2)}\n`, "utf8");
 }
 
+function isNotFound(error: unknown): boolean {
+  return (
+    error instanceof BlobNotFoundError ||
+    (error instanceof Error && /not found/i.test(error.message))
+  );
+}
+
+// get() reports the CDN's ETag. ifMatch has to use the storage ETag from head(),
+// otherwise the write is rejected once the file is cached.
+async function readStorageEtag(): Promise<string | undefined> {
+  try {
+    const metadata = await head(BLOB_PATH);
+    const etag = metadata.etag?.trim().replace(/^W\//i, "");
+    return etag || undefined;
+  } catch (error) {
+    if (isNotFound(error)) return undefined;
+    console.error(error);
+    return undefined;
+  }
+}
+
 async function readBlobStore(): Promise<Snapshot> {
   try {
-    const result = await get(BLOB_PATH, { access: "private", useCache: false });
-    if (!result || result.statusCode !== 200 || !result.stream) return { clients: [] };
+    const [etag, result] = await Promise.all([
+      readStorageEtag(),
+      get(BLOB_PATH, { access: "private", useCache: false }),
+    ]);
+    if (!result || result.statusCode !== 200 || !result.stream) {
+      if (etag) throw new Error("Client database could not be read.");
+      return { clients: [] };
+    }
     const raw = await new Response(result.stream).text();
-    return { clients: parseDatabase(raw), etag: result.blob.etag };
+    return { clients: parseDatabase(raw), etag };
   } catch (error) {
-    if (error instanceof BlobNotFoundError) return { clients: [] };
+    if (isNotFound(error)) return { clients: [] };
     throw error;
   }
 }
@@ -120,19 +147,25 @@ async function mutate<T>(
   if (getStorageMode() === "unconfigured") throw new StorageNotConfiguredError();
 
   return exclusive(async () => {
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      const snapshot = await readSnapshot();
-      const next = change(snapshot.clients);
-      if (!next.write) return next.result;
+    let usedCondition = false;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
-        await writeSnapshot(next.clients, snapshot.etag);
+        const snapshot = await readSnapshot();
+        const next = change(snapshot.clients);
+        if (!next.write) return next.result;
+        // A cached ETag does not match the blob store, so the version check
+        // fails after the first clients are saved. The second attempt writes
+        // the record anyway.
+        const etag = attempt === 0 ? snapshot.etag : undefined;
+        usedCondition = Boolean(etag);
+        await writeSnapshot(next.clients, etag);
         return next.result;
       } catch (error) {
-        if (error instanceof BlobPreconditionFailedError && attempt < 3) continue;
-        throw error;
+        if (error instanceof StorageNotConfiguredError) throw error;
+        if (attempt === 1 || !usedCondition) throw error;
       }
     }
-    throw new Error("Could not save the client database.");
+    throw new Error("Client database could not be saved.");
   });
 }
 

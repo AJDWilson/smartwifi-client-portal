@@ -88,7 +88,10 @@ function ClientForm({
       }
       if (!response.ok || !payload?.client) {
         setFields(payload?.fields ?? {});
-        setError(payload?.error || "That client could not be saved.");
+        setError(
+          payload?.error ||
+            `That client could not be saved${response.status ? ` (${response.status})` : ""}.`,
+        );
         setSaving(false);
         return;
       }
